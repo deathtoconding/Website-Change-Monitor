@@ -1,0 +1,2 @@
+# This fixture intentionally contains invalid HTML to exercise parser recovery.
+fixtures/malformed.html

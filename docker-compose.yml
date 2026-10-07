@@ -1,0 +1,91 @@
+name: website-change-monitor
+
+x-runtime-environment: &runtime-environment
+  NODE_ENV: production
+  DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to a production PostgreSQL URL in .env}
+  REDIS_URL: ${REDIS_URL:?Set REDIS_URL to a production Redis URL in .env}
+  SESSION_SECRET: ${SESSION_SECRET:?Set a unique SESSION_SECRET in .env}
+  APP_ORIGIN: ${APP_ORIGIN:?Set the public browser origin in .env}
+  APP_BASE_URL: ${APP_BASE_URL:-${APP_ORIGIN}}
+  SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-168}
+  METRICS_TOKEN: ${METRICS_TOKEN:-}
+  WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+  SCHEDULER_INTERVAL_MS: ${SCHEDULER_INTERVAL_MS:-10000}
+  MAX_FETCH_BYTES: ${MAX_FETCH_BYTES:-2000000}
+  FETCH_TIMEOUT_MS: ${FETCH_TIMEOUT_MS:-15000}
+  FETCH_MAX_REDIRECTS: ${FETCH_MAX_REDIRECTS:-5}
+  FETCH_DOMAIN_COOLDOWN_MS: ${FETCH_DOMAIN_COOLDOWN_MS:-1000}
+  RESEND_API_KEY: ${RESEND_API_KEY:-}
+  EMAIL_FROM: ${EMAIL_FROM:-alerts@example.com}
+  STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+  STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+  STRIPE_PRICE_STARTER: ${STRIPE_PRICE_STARTER:-}
+  STRIPE_PRICE_BUSINESS: ${STRIPE_PRICE_BUSINESS:-}
+  ALLOW_DEV_VERIFICATION_TOKEN: ${ALLOW_DEV_VERIFICATION_TOKEN:-false}
+
+x-image-build: &image-build
+  context: .
+  args:
+    ENABLE_HSTS: ${ENABLE_HSTS:-false}
+
+services:
+  migrate:
+    build: *image-build
+    command: ["node", "build/server/db/migrate.js"]
+    environment: *runtime-environment
+    restart: "no"
+
+  api:
+    build: *image-build
+    command: ["node", "build/server/api.js"]
+    environment: *runtime-environment
+    expose:
+      - "4000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4000/ready').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  web:
+    build: *image-build
+    command: ["npm", "run", "start:web"]
+    environment:
+      NODE_ENV: production
+      ENABLE_HSTS: ${ENABLE_HSTS:-false}
+      API_INTERNAL_ORIGIN: http://api:4000
+    ports:
+      - "127.0.0.1:${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: *image-build
+    command: ["node", "build/server/worker.js"]
+    environment: *runtime-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  scheduler:
+    build: *image-build
+    command: ["node", "build/server/scheduler.js"]
+    environment: *runtime-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped

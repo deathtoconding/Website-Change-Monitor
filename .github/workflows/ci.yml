@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Type, lint, test, and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      REDIS_TEST_URL: redis://127.0.0.1:6379/15
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+      - name: Validate Drizzle migration history
+        run: npm run db:check
+      - name: Check formatting
+        run: npm run format:check
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Production build
+        run: npm run build
+      - name: Validate production Compose configuration
+        env:
+          NODE_ENV: production
+          DATABASE_URL: postgres://ci:ci@postgres.example.test/wcm
+          REDIS_URL: rediss://ci:ci@redis.example.test:6380
+          SESSION_SECRET: ci-compose-validation-secret-not-for-use
+          APP_ORIGIN: https://app.example.test
+          APP_BASE_URL: https://app.example.test
+        run: |
+          docker compose config --quiet
+          docker compose -f docker-compose.dev.yml config --quiet
+          if env -u DATABASE_URL -u REDIS_URL docker compose config --quiet 2>/tmp/compose-config-error; then
+            echo "Production Compose unexpectedly accepted missing infrastructure URLs."
+            exit 1
+          fi
+          grep -q DATABASE_URL /tmp/compose-config-error
+          if env -u REDIS_URL DATABASE_URL=postgres://ci:ci@postgres.example.test/wcm docker compose config --quiet 2>/tmp/compose-config-error; then
+            echo "Production Compose unexpectedly accepted a missing REDIS_URL."
+            exit 1
+          fi
+          grep -q REDIS_URL /tmp/compose-config-error
+          docker compose config --format json | jq -e '
+            .services.api.environment.NODE_ENV == "production" and
+            .services.api.environment.DATABASE_URL == env.DATABASE_URL and
+            .services.api.environment.REDIS_URL == env.REDIS_URL and
+            .services.migrate.environment.DATABASE_URL == env.DATABASE_URL and
+            .services.migrate.environment.REDIS_URL == env.REDIS_URL and
+            .services.worker.environment.DATABASE_URL == env.DATABASE_URL and
+            .services.worker.environment.REDIS_URL == env.REDIS_URL and
+            .services.scheduler.environment.DATABASE_URL == env.DATABASE_URL and
+            .services.scheduler.environment.REDIS_URL == env.REDIS_URL
+          ' >/dev/null
+      - name: Container build
+        run: docker build --build-arg ENABLE_HSTS=false -t website-change-monitor:ci .
