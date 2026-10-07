@@ -60,9 +60,16 @@ jobs:
           SESSION_SECRET: ci-compose-validation-secret-not-for-use
           APP_ORIGIN: https://app.example.test
           APP_BASE_URL: https://app.example.test
+        run: docker compose config --quiet
+      - name: Validate development Compose configuration
+        run: docker compose -f docker-compose.dev.yml config --quiet
+      - name: Ensure production Compose requires both infrastructure URLs
+        env:
+          NODE_ENV: production
+          SESSION_SECRET: ci-compose-validation-secret-not-for-use
+          APP_ORIGIN: https://app.example.test
+          APP_BASE_URL: https://app.example.test
         run: |
-          docker compose config --quiet
-          docker compose -f docker-compose.dev.yml config --quiet
           if env -u DATABASE_URL -u REDIS_URL docker compose config --quiet 2>/tmp/compose-config-error; then
             echo "Production Compose unexpectedly accepted missing infrastructure URLs."
             exit 1
@@ -73,16 +80,26 @@ jobs:
             exit 1
           fi
           grep -q REDIS_URL /tmp/compose-config-error
-          docker compose config --format json | jq -e '
+      - name: Verify Compose passes authoritative infrastructure URLs
+        env:
+          NODE_ENV: production
+          DATABASE_URL: postgres://ci:ci@postgres.example.test/wcm
+          REDIS_URL: rediss://ci:ci@redis.example.test:6380
+          SESSION_SECRET: ci-compose-validation-secret-not-for-use
+          APP_ORIGIN: https://app.example.test
+          APP_BASE_URL: https://app.example.test
+        run: |
+          docker compose config --format json >/tmp/compose-config.json
+          jq -e --arg db "$DATABASE_URL" --arg redis "$REDIS_URL" '
             .services.api.environment.NODE_ENV == "production" and
-            .services.api.environment.DATABASE_URL == env.DATABASE_URL and
-            .services.api.environment.REDIS_URL == env.REDIS_URL and
-            .services.migrate.environment.DATABASE_URL == env.DATABASE_URL and
-            .services.migrate.environment.REDIS_URL == env.REDIS_URL and
-            .services.worker.environment.DATABASE_URL == env.DATABASE_URL and
-            .services.worker.environment.REDIS_URL == env.REDIS_URL and
-            .services.scheduler.environment.DATABASE_URL == env.DATABASE_URL and
-            .services.scheduler.environment.REDIS_URL == env.REDIS_URL
-          ' >/dev/null
+            .services.api.environment.DATABASE_URL == $db and
+            .services.api.environment.REDIS_URL == $redis and
+            .services.migrate.environment.DATABASE_URL == $db and
+            .services.migrate.environment.REDIS_URL == $redis and
+            .services.worker.environment.DATABASE_URL == $db and
+            .services.worker.environment.REDIS_URL == $redis and
+            .services.scheduler.environment.DATABASE_URL == $db and
+            .services.scheduler.environment.REDIS_URL == $redis
+          ' /tmp/compose-config.json >/dev/null
       - name: Container build
         run: docker build --build-arg ENABLE_HSTS=false -t website-change-monitor:ci .
