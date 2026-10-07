@@ -1,0 +1,1 @@
+CREATE INDEX "snapshots_fetched_at_idx" ON "snapshots" USING btree ("fetched_at");

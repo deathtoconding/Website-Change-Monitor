@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Type, lint, test, and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      REDIS_TEST_URL: redis://127.0.0.1:6379/15
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+      - name: Validate Drizzle migration history
+        run: npm run db:check
+      - name: Check formatting
+        run: npm run format:check
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Production build
+        run: npm run build
+      - name: Validate production Compose configuration
+        env:
+          NODE_ENV: production
+          DATABASE_URL: postgres://ci:ci@postgres.example.test/wcm
+          REDIS_URL: rediss://ci:ci@redis.example.test:6380
+          SESSION_SECRET: ci-compose-validation-secret-not-for-use
+          APP_ORIGIN: https://app.example.test
+          APP_BASE_URL: https://app.example.test
+        run: docker compose config --quiet
+      - name: Validate development Compose configuration
+        run: docker compose -f docker-compose.dev.yml config --quiet
+      - name: Ensure production Compose requires DATABASE_URL
+        env:
+          NODE_ENV: production
+          SESSION_SECRET: ci-compose-validation-secret-not-for-use
+          APP_ORIGIN: https://app.example.test
+          APP_BASE_URL: https://app.example.test
+        run: |
+          if DATABASE_URL= REDIS_URL= docker compose --env-file /dev/null config --quiet 2>/tmp/compose-config-error; then
+            echo "Production Compose unexpectedly accepted a missing DATABASE_URL."
+            exit 1
+          fi
+          if ! grep -q DATABASE_URL /tmp/compose-config-error; then
+            cat /tmp/compose-config-error >&2
+            echo "::error::Compose failed, but did not report that DATABASE_URL is required."
+            exit 1
+          fi
+      - name: Ensure production Compose requires REDIS_URL
+        env:
+          NODE_ENV: production
+          DATABASE_URL: postgres://ci:ci@postgres.example.test/wcm
+          SESSION_SECRET: ci-compose-validation-secret-not-for-use
+          APP_ORIGIN: https://app.example.test
+          APP_BASE_URL: https://app.example.test
+        run: |
+          if REDIS_URL= docker compose --env-file /dev/null config --quiet 2>/tmp/compose-config-error; then
+            echo "Production Compose unexpectedly accepted a missing REDIS_URL."
+            exit 1
+          fi
+          if ! grep -q REDIS_URL /tmp/compose-config-error; then
+            cat /tmp/compose-config-error >&2
+            echo "::error::Compose failed, but did not report that REDIS_URL is required."
+            exit 1
+          fi
+      - name: Verify Compose passes authoritative infrastructure URLs
+        env:
+          NODE_ENV: production
+          DATABASE_URL: postgres://ci:ci@postgres.example.test/wcm
+          REDIS_URL: rediss://ci:ci@redis.example.test:6380
+          SESSION_SECRET: ci-compose-validation-secret-not-for-use
+          APP_ORIGIN: https://app.example.test
+          APP_BASE_URL: https://app.example.test
+        run: |
+          docker compose config --format json >/tmp/compose-config.json
+          jq -e --arg db "$DATABASE_URL" --arg redis "$REDIS_URL" '
+            .services.api.environment.NODE_ENV == "production" and
+            .services.api.environment.DATABASE_URL == $db and
+            .services.api.environment.REDIS_URL == $redis and
+            .services.migrate.environment.DATABASE_URL == $db and
+            .services.migrate.environment.REDIS_URL == $redis and
+            .services.worker.environment.DATABASE_URL == $db and
+            .services.worker.environment.REDIS_URL == $redis and
+            .services.scheduler.environment.DATABASE_URL == $db and
+            .services.scheduler.environment.REDIS_URL == $redis
+          ' /tmp/compose-config.json >/dev/null
+      - name: Container build
+        run: docker build --build-arg ENABLE_HSTS=false -t website-change-monitor:ci .
