@@ -62,6 +62,9 @@ test("registers, logs in, monitors a fixture, records a change, and manages acce
     page.waitForURL(/\/api\/auth\/verify-email\?/),
     verificationLink.click(),
   ]);
+  await page
+    .getByRole("button", { name: "Verify email address", exact: true })
+    .click();
   await expect(
     page.getByRole("heading", { name: "Email verified" }),
   ).toBeVisible();

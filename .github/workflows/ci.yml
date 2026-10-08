@@ -404,7 +404,20 @@ jobs:
       - name: Build production application
         run: npm run build
       - name: Run browser qualification journey
-        run: npm run test:e2e
+        run: |
+          set +e
+          npm run test:e2e 2>&1 | tee /tmp/playwright-qualification.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            tail -n 30 /tmp/playwright-qualification.log | while IFS= read -r line; do
+              line=${line//'%'/'%25'}
+              line=${line//$'\r'/'%0D'}
+              line=${line//$'\n'/'%0A'}
+              echo "::error title=Playwright qualification::$line"
+            done
+            exit "$status"
+          fi
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@v7

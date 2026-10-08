@@ -134,9 +134,13 @@ try {
   assertStatus(resend.response, 200, "verification token issuance");
   if (!resend.body.developmentVerificationToken)
     throw new Error("The test-only verification token was not returned.");
-  const verified = await fetch(
-    `${apiOrigin}/api/auth/verify-email?token=${encodeURIComponent(resend.body.developmentVerificationToken)}`,
-  );
+  const verified = await fetch(`${apiOrigin}/api/auth/verify-email`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      token: resend.body.developmentVerificationToken,
+    }),
+  });
   if (!verified.ok) throw new Error("The verification flow did not complete.");
 
   const login = await postJson(apiOrigin, "/api/auth/login", {
