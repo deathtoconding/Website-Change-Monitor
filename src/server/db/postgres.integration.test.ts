@@ -30,7 +30,7 @@ describe.skipIf(!pool)("PostgreSQL 16 persistence integration", () => {
 
   it("persists snapshots and timestamps and enforces unique and foreign-key constraints", async () => {
     const userId = await createUser();
-    const timestamp = new Date("2026-04-05T06:07:08.901Z");
+    const timestamp = new Date();
     const monitor = await pool!.query<{ id: string; created_at: Date }>(
       `INSERT INTO monitors (user_id, name, url, next_check_at)
        VALUES ($1, 'PG integration monitor', 'https://example.com/', $2)

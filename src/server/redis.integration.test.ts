@@ -29,7 +29,9 @@ describe.skipIf(!redisUrl)("Redis 7 infrastructure integration", () => {
       maxRetriesPerRequest: 1,
       connectTimeout: 5_000,
       enableOfflineQueue: false,
+      lazyConnect: true,
     });
+    await appRedis.connect();
     await appRedis.ping();
   });
 

@@ -239,6 +239,18 @@ try {
   await verifyWorkerFailurePersistence(apiOrigin, authenticated, runId);
   await verifyMigrationBackedWorkflowRows(monitorId);
   console.log("Combined PostgreSQL + Redis qualification passed.");
+} catch (error) {
+  const message =
+    error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  console.error(error);
+  const annotationMessage = message
+    .replaceAll("%", "%25")
+    .replaceAll("\r", "%0D")
+    .replaceAll("\n", "%0A");
+  process.stderr.write(
+    `::error title=Combined workflow qualification::${annotationMessage}\n`,
+  );
+  process.exitCode = 1;
 } finally {
   if (testAccount) {
     const { cookie } = testAccount.authenticated;

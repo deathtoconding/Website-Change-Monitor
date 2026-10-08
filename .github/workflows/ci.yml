@@ -30,9 +30,9 @@ jobs:
           --health-retries 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -153,9 +153,9 @@ jobs:
           --health-retries 20
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -195,9 +195,9 @@ jobs:
           --health-retries 20
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -249,9 +249,9 @@ jobs:
           --health-retries 20
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -278,9 +278,9 @@ jobs:
       WEB_PORT: "3000"
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -323,12 +323,29 @@ jobs:
             sleep 2
           done
           curl --fail --silent --show-error http://127.0.0.1:4000/health | jq -e '.status == "ok"'
-          curl --fail --silent --show-error http://127.0.0.1:3000/ >/dev/null
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:3000/ --output /tmp/compose-web.html 2>/tmp/compose-web-curl-error; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              cat /tmp/compose-web-curl-error 2>/dev/null || true
+              docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml logs --no-color
+              exit 1
+            fi
+            sleep 2
+          done
           test "$(docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml exec -T postgres psql -U postgres -d wcm -Atqc 'SELECT count(*) FROM drizzle.__drizzle_migrations')" = "4"
           npm run qualify:distributed
       - name: Collect Compose logs on failure
         if: failure()
-        run: docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml logs --no-color
+        run: |
+          docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml logs --no-color >/tmp/compose-runtime-logs 2>&1 || true
+          tail -n 40 /tmp/compose-runtime-logs | while IFS= read -r line; do
+            line=${line//'%'/'%25'}
+            line=${line//$'\r'/'%0D'}
+            line=${line//$'\n'/'%0A'}
+            echo "::error title=Compose runtime log::$line"
+          done
       - name: Stop Compose and remove disposable data volumes
         if: always()
         run: docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml down -v --remove-orphans
@@ -338,6 +355,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
+      NODE_ENV: test
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/wcm
       REDIS_URL: redis://127.0.0.1:6379/13
       APP_ORIGIN: http://127.0.0.1:3000
@@ -371,9 +389,9 @@ jobs:
           --health-retries 20
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -389,7 +407,7 @@ jobs:
         run: npm run test:e2e
       - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-qualification-report
           path: |
@@ -430,7 +448,7 @@ jobs:
           fi
       - name: Set up Node.js
         if: steps.credentials.outputs.configured == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -478,7 +496,7 @@ jobs:
           fi
       - name: Set up Node.js
         if: steps.credentials.outputs.configured == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
