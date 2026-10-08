@@ -3,8 +3,53 @@ import {
   assertProductionDatabaseUrlConfigured,
   assertProductionInfrastructureConfigured,
   assertProductionUrls,
+  getConfiguredTestFixtureOrigin,
   getMissingProductionEmailConfiguration,
 } from "./config-validation.js";
+
+describe("test-fixture configuration validation", () => {
+  it("permits only one explicitly configured HTTP fixture origin in tests", () => {
+    expect(
+      getConfiguredTestFixtureOrigin(
+        "test",
+        "http://fixture.test:18088",
+        "127.0.0.1",
+      ),
+    ).toBe("http://fixture.test:18088");
+    expect(
+      getConfiguredTestFixtureOrigin("development", undefined, undefined),
+    ).toBeUndefined();
+    expect(() =>
+      getConfiguredTestFixtureOrigin(
+        "production",
+        "http://fixture.test:18088",
+        undefined,
+      ),
+    ).toThrow("TEST_FIXTURE_ORIGIN is only allowed in NODE_ENV=test.");
+  });
+
+  it("rejects non-HTTP origins, paths, credentials, and unpaired fixture addresses", () => {
+    for (const origin of [
+      "https://fixture.test",
+      "http://fixture.test/page",
+      "http://user:password@fixture.test",
+    ]) {
+      expect(() =>
+        getConfiguredTestFixtureOrigin("test", origin, undefined),
+      ).toThrow("TEST_FIXTURE_ORIGIN must be an HTTP origin");
+    }
+    expect(() =>
+      getConfiguredTestFixtureOrigin("test", undefined, "127.0.0.1"),
+    ).toThrow("TEST_FIXTURE_ADDRESS requires a test fixture origin");
+    expect(() =>
+      getConfiguredTestFixtureOrigin(
+        "test",
+        "http://fixture.test:18088",
+        "fixture.test",
+      ),
+    ).toThrow("TEST_FIXTURE_ADDRESS requires a test fixture origin");
+  });
+});
 
 describe("production configuration validation", () => {
   it("requires HTTPS for both the app origin and email-link base URL", () => {

@@ -1,4 +1,37 @@
+import { isIP } from "node:net";
 import ipaddr from "ipaddr.js";
+
+export function getConfiguredTestFixtureOrigin(
+  nodeEnv: string,
+  fixtureOrigin: string | undefined,
+  fixtureAddress: string | undefined,
+): string | undefined {
+  const fixtureUrl = fixtureOrigin ? new URL(fixtureOrigin) : undefined;
+  if (fixtureUrl && nodeEnv !== "test")
+    throw new Error("TEST_FIXTURE_ORIGIN is only allowed in NODE_ENV=test.");
+  if (
+    fixtureUrl &&
+    (fixtureUrl.protocol !== "http:" ||
+      fixtureUrl.pathname !== "/" ||
+      fixtureUrl.search ||
+      fixtureUrl.hash ||
+      fixtureUrl.username ||
+      fixtureUrl.password)
+  ) {
+    throw new Error(
+      "TEST_FIXTURE_ORIGIN must be an HTTP origin without a path or credentials.",
+    );
+  }
+  if (
+    fixtureAddress &&
+    (nodeEnv !== "test" || !fixtureUrl || !isIP(fixtureAddress))
+  ) {
+    throw new Error(
+      "TEST_FIXTURE_ADDRESS requires a test fixture origin and a valid IP in NODE_ENV=test.",
+    );
+  }
+  return fixtureUrl?.origin;
+}
 
 export function assertProductionUrls(
   nodeEnv: string,

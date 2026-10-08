@@ -23,7 +23,14 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "vitest run src app"
+    "test": "vitest run src app --exclude src/server/db/postgres.integration.test.ts --exclude src/server/redis.integration.test.ts",
+    "test:postgres": "vitest run src/server/db/postgres.integration.test.ts",
+    "test:redis": "vitest run src/server/rate-limits.integration.test.ts src/server/redis.integration.test.ts",
+    "qualify:postgres-upgrade": "node scripts/qualify-postgres-upgrade.mjs",
+    "qualify:distributed": "node scripts/qualify-distributed.mjs",
+    "qualify:stripe": "node scripts/qualify-stripe.mjs",
+    "qualify:email": "node scripts/qualify-email.mjs",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "argon2": "^0.45.1",
@@ -52,6 +59,7 @@
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.8",
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.64.0",
     "@types/connect-pg-simple": "^7.0.3",
     "@types/express": "^5.0.6",
     "@types/express-session": "^1.19.0",

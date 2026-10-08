@@ -30,7 +30,10 @@ import { incrementMetric } from "../metrics.js";
 
 assertEmailIntegrationConfigured();
 
-const retryDelays = [30_000, 2 * 60_000, 10 * 60_000];
+const retryDelays =
+  env.nodeEnv === "test"
+    ? [250, 500, 1_000]
+    : [30_000, 2 * 60_000, 10 * 60_000];
 
 export const notificationWorker = new Worker<NotificationJobData>(
   "change-notifications",

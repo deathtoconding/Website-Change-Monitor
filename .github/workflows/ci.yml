@@ -13,9 +13,9 @@ concurrency:
 
 jobs:
   quality:
-    name: Type, lint, test, and build
+    name: Type, lint, unit tests, and build
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       REDIS_TEST_URL: redis://127.0.0.1:6379/15
     services:
@@ -30,14 +30,14 @@ jobs:
           --health-retries 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --no-audit --no-fund
       - name: Audit dependencies
         run: npm audit --audit-level=high
       - name: Validate Drizzle migration history
@@ -48,7 +48,7 @@ jobs:
         run: npm run lint
       - name: Typecheck
         run: npm run typecheck
-      - name: Unit tests
+      - name: Unit tests and Redis auth-rate-limit integration
         run: npm test
       - name: Production build
         run: npm run build
@@ -61,20 +61,30 @@ jobs:
           APP_ORIGIN: https://app.example.test
           APP_BASE_URL: https://app.example.test
         run: docker compose config --quiet
+      - name: Validate qualification Compose configuration
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:55432/wcm
+          REDIS_URL: redis://127.0.0.1:56379/0
+          SESSION_SECRET: qualification-compose-validation-secret
+          APP_ORIGIN: http://127.0.0.1:3000
+          APP_BASE_URL: http://127.0.0.1:3000
+          WEB_PORT: "3000"
+        run: docker compose -f docker-compose.yml -f docker-compose.qualify.yml config --quiet
       - name: Validate development Compose configuration
         run: docker compose -f docker-compose.dev.yml config --quiet
       - name: Ensure production Compose requires DATABASE_URL
         env:
           NODE_ENV: production
+          REDIS_URL: rediss://ci:ci@redis.example.test:6380
           SESSION_SECRET: ci-compose-validation-secret-not-for-use
           APP_ORIGIN: https://app.example.test
           APP_BASE_URL: https://app.example.test
         run: |
-          if DATABASE_URL= REDIS_URL= docker compose --env-file /dev/null config --quiet 2>/tmp/compose-config-error; then
+          if env -u DATABASE_URL docker compose --env-file /dev/null config --quiet >/tmp/compose-config-error 2>&1; then
             echo "Production Compose unexpectedly accepted a missing DATABASE_URL."
             exit 1
           fi
-          if ! grep -q DATABASE_URL /tmp/compose-config-error; then
+          if ! grep -Fq DATABASE_URL /tmp/compose-config-error; then
             cat /tmp/compose-config-error >&2
             echo "::error::Compose failed, but did not report that DATABASE_URL is required."
             exit 1
@@ -87,11 +97,11 @@ jobs:
           APP_ORIGIN: https://app.example.test
           APP_BASE_URL: https://app.example.test
         run: |
-          if REDIS_URL= docker compose --env-file /dev/null config --quiet 2>/tmp/compose-config-error; then
+          if env -u REDIS_URL docker compose --env-file /dev/null config --quiet >/tmp/compose-config-error 2>&1; then
             echo "Production Compose unexpectedly accepted a missing REDIS_URL."
             exit 1
           fi
-          if ! grep -q REDIS_URL /tmp/compose-config-error; then
+          if ! grep -Fq REDIS_URL /tmp/compose-config-error; then
             cat /tmp/compose-config-error >&2
             echo "::error::Compose failed, but did not report that REDIS_URL is required."
             exit 1
@@ -119,3 +129,436 @@ jobs:
           ' /tmp/compose-config.json >/dev/null
       - name: Container build
         run: docker build --build-arg ENABLE_HSTS=false -t website-change-monitor:ci .
+
+  postgres-integration:
+    name: PostgreSQL 16 migrations and persistence
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/wcm
+      QUALIFICATION_DISPOSABLE_DATABASE: "true"
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: wcm
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d wcm"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Check migration history
+        run: npm run db:check
+      - name: Apply fresh migrations to PostgreSQL 16
+        run: npm run db:migrate
+      - name: Confirm migration idempotency
+        run: npm run db:migrate
+      - name: Upgrade an existing three-migration PostgreSQL database
+        run: npm run qualify:postgres-upgrade
+      - name: Run real PostgreSQL persistence and concurrency tests
+        run: npm run test:postgres
+
+  redis-integration:
+    name: Redis 7 queues, locks, retries, and coordination
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NODE_ENV: test
+      REDIS_URL: redis://127.0.0.1:6379/15
+      REDIS_TEST_URL: redis://127.0.0.1:6379/15
+      FETCH_TIMEOUT_MS: "1000"
+      FETCH_MAX_REDIRECTS: "0"
+      FETCH_DOMAIN_COOLDOWN_MS: "250"
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Run cross-process auth and BullMQ integration tests
+        run: npm run test:redis
+
+  distributed-integration:
+    name: PostgreSQL + Redis API, worker, and scheduler workflow
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/wcm
+      REDIS_URL: redis://127.0.0.1:6379/14
+      APP_ORIGIN: http://127.0.0.1:3000
+      APP_BASE_URL: http://127.0.0.1:3000
+      SESSION_SECRET: qualification-distributed-secret-not-for-production
+      TEST_FIXTURE_ORIGIN: http://fixture.test:18088
+      TEST_FIXTURE_ADDRESS: 127.0.0.1
+      ALLOW_DEV_VERIFICATION_TOKEN: "true"
+      SCHEDULER_INTERVAL_MS: "1000"
+      FETCH_TIMEOUT_MS: "1000"
+      FETCH_MAX_REDIRECTS: "0"
+      FETCH_DOMAIN_COOLDOWN_MS: "250"
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: wcm
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d wcm"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Validate migrations
+        run: npm run db:check
+      - name: Apply real PostgreSQL schema
+        run: npm run db:migrate
+      - name: Exercise API, scheduler, BullMQ worker, retries, changes, and outbox
+        run: npm run qualify:distributed
+
+  compose-runtime:
+    name: Docker Compose runtime and workflow smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      NODE_ENV: production
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/wcm
+      REDIS_URL: redis://redis:6379/0
+      SESSION_SECRET: qualification-compose-secret-not-for-production
+      APP_ORIGIN: https://qualification.example.test
+      APP_BASE_URL: https://qualification.example.test
+      WEB_PORT: "3000"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies for the host-side smoke harness
+        run: npm ci --no-audit --no-fund
+      - name: Validate and build qualification Compose stack
+        run: |
+          docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml config --quiet
+          docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml build
+      - name: Start PostgreSQL, Redis, migrations, API, worker, scheduler, web, and fixture
+        run: docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml up -d
+      - name: Verify Compose services, migrations, health, readiness, and real queue workflow
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:55432/wcm
+          REDIS_URL: redis://127.0.0.1:56379/0
+          APP_ORIGIN: http://127.0.0.1:3000
+          APP_BASE_URL: http://127.0.0.1:3000
+          SESSION_SECRET: qualification-compose-secret-not-for-production
+          TEST_FIXTURE_ORIGIN: http://fixture.test:18088
+          QUALIFICATION_API_ORIGIN: http://127.0.0.1:4000
+          FIXTURE_CONTROL_URL: http://127.0.0.1:18088/__control
+        run: |
+          set -euo pipefail
+          docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml ps --all
+          for service in postgres redis api worker scheduler web fixture; do
+            docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml ps --status running --services | grep -Fx "$service"
+          done
+          docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml exec -T postgres pg_isready -U postgres -d wcm
+          test "$(docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml exec -T redis redis-cli ping | tr -d '\r')" = "PONG"
+          for attempt in $(seq 1 60); do
+            if curl --silent --show-error http://127.0.0.1:4000/ready --output /tmp/compose-ready.json && jq -e '.status == "ready" and .dependencies.postgres == "ok" and .dependencies.redis == "ok"' /tmp/compose-ready.json >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              cat /tmp/compose-ready.json 2>/dev/null || true
+              docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml logs --no-color
+              exit 1
+            fi
+            sleep 2
+          done
+          curl --fail --silent --show-error http://127.0.0.1:4000/health | jq -e '.status == "ok"'
+          compose=(docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml)
+          redis_stopped=0
+          restore_redis() {
+            if [ "$redis_stopped" -eq 1 ]; then
+              "${compose[@]}" start redis || true
+            fi
+          }
+          trap restore_redis EXIT
+          "${compose[@]}" stop redis
+          redis_stopped=1
+          redis_down_started_at=$(date +%s%3N)
+          redis_down_status=$(curl --silent --show-error --max-time 4 \
+            --output /tmp/compose-redis-down-ready.json \
+            --write-out '%{http_code}' http://127.0.0.1:4000/ready)
+          redis_down_elapsed_ms=$(( $(date +%s%3N) - redis_down_started_at ))
+          test "$redis_down_status" = "503"
+          jq -e '.status == "not_ready" and .dependencies.postgres == "ok" and .dependencies.redis == "unavailable"' /tmp/compose-redis-down-ready.json >/dev/null
+          test "$redis_down_elapsed_ms" -lt 4000
+          echo "Live Compose readiness isolated Redis failure in ${redis_down_elapsed_ms} ms."
+          "${compose[@]}" start redis
+          redis_stopped=0
+          redis_recovered=false
+          for attempt in $(seq 1 60); do
+            if [ "$("${compose[@]}" exec -T redis redis-cli ping 2>/dev/null | tr -d '\r')" = "PONG" ] && \
+              curl --fail --silent http://127.0.0.1:4000/ready | jq -e '.status == "ready" and .dependencies.postgres == "ok" and .dependencies.redis == "ok"' >/dev/null; then
+              redis_recovered=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$redis_recovered" != "true" ]; then
+            "${compose[@]}" logs --no-color
+            echo "::error::The Compose API did not recover readiness after Redis restarted."
+            exit 1
+          fi
+          trap - EXIT
+          echo "Live Compose readiness recovered after Redis restart."
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:3000/ --output /tmp/compose-web.html 2>/tmp/compose-web-curl-error; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              cat /tmp/compose-web-curl-error 2>/dev/null || true
+              docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml logs --no-color
+              exit 1
+            fi
+            sleep 2
+          done
+          test "$(docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml exec -T postgres psql -U postgres -d wcm -Atqc 'SELECT count(*) FROM drizzle.__drizzle_migrations')" = "4"
+          npm run qualify:distributed
+      - name: Collect Compose logs on failure
+        if: failure()
+        run: |
+          docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml logs --no-color >/tmp/compose-runtime-logs 2>&1 || true
+          tail -n 40 /tmp/compose-runtime-logs | while IFS= read -r line; do
+            line=${line//'%'/'%25'}
+            line=${line//$'\r'/'%0D'}
+            line=${line//$'\n'/'%0A'}
+            echo "::error title=Compose runtime log::$line"
+          done
+      - name: Stop Compose and remove disposable data volumes
+        if: always()
+        run: docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml down -v --remove-orphans
+
+  browser-e2e:
+    name: Playwright browser end-to-end on PostgreSQL and Redis
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/wcm
+      REDIS_URL: redis://127.0.0.1:6379/13
+      APP_ORIGIN: http://127.0.0.1:3000
+      APP_BASE_URL: http://127.0.0.1:3000
+      SESSION_SECRET: qualification-browser-secret-not-for-production
+      TEST_FIXTURE_ORIGIN: http://fixture.test:18088
+      TEST_FIXTURE_ADDRESS: 127.0.0.1
+      ALLOW_DEV_VERIFICATION_TOKEN: "true"
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: wcm
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d wcm"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Validate and migrate test database
+        run: npm run db:check && npm run db:migrate
+      - name: Install Chromium and system dependencies
+        run: npx playwright install --with-deps chromium
+      - name: Build production application
+        run: npm run build
+      - name: Run browser qualification journey
+        run: |
+          set +e
+          npm run test:e2e 2>&1 | tee /tmp/playwright-qualification.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            tail -n 30 /tmp/playwright-qualification.log | while IFS= read -r line; do
+              line=${line//'%'/'%25'}
+              line=${line//$'\r'/'%0D'}
+              line=${line//$'\n'/'%0A'}
+              echo "::error title=Playwright qualification::$line"
+            done
+            exit "$status"
+          fi
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-qualification-report
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  stripe-optional:
+    name: Stripe test-mode checkout preflight (optional)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check for legitimate Stripe test-mode secrets
+        id: credentials
+        env:
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          STRIPE_PRICE_STARTER: ${{ secrets.STRIPE_PRICE_STARTER }}
+          STRIPE_PRICE_BUSINESS: ${{ secrets.STRIPE_PRICE_BUSINESS }}
+        run: |
+          if [ -z "$STRIPE_SECRET_KEY" ] || [ -z "$STRIPE_WEBHOOK_SECRET" ] || [ -z "$STRIPE_PRICE_STARTER" ] || [ -z "$STRIPE_PRICE_BUSINESS" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Stripe test-mode qualification"
+              echo "**BLOCKED — test credentials unavailable.**"
+              echo "Configure STRIPE_SECRET_KEY (sk_test_), STRIPE_WEBHOOK_SECRET (whsec_), STRIPE_PRICE_STARTER, and STRIPE_PRICE_BUSINESS in GitHub Secrets to enable this optional live test-mode preflight."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$STRIPE_SECRET_KEY" != sk_test_* || "$STRIPE_WEBHOOK_SECRET" != whsec_* || "$STRIPE_PRICE_STARTER" != price_* || "$STRIPE_PRICE_BUSINESS" != price_* ]]; then
+            echo "::error::Stripe qualification requires test-mode keys, a webhook signing secret, and Stripe price IDs."
+            exit 1
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Stripe test-mode qualification"
+              echo "Test-mode secrets are configured. The live preflight will retrieve both recurring prices, create and expire one checkout session per plan, and verify a synthetic event signature. It submits no payment and does not claim a completed subscription/webhook lifecycle."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Set up Node.js
+        if: steps.credentials.outputs.configured == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        if: steps.credentials.outputs.configured == 'true'
+        run: npm ci --no-audit --no-fund
+      - name: Exercise real Stripe test-mode prices and checkout sessions
+        if: steps.credentials.outputs.configured == 'true'
+        env:
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          STRIPE_PRICE_STARTER: ${{ secrets.STRIPE_PRICE_STARTER }}
+          STRIPE_PRICE_BUSINESS: ${{ secrets.STRIPE_PRICE_BUSINESS }}
+          QUALIFICATION_RUN_ID: wcm-${{ github.run_id }}-${{ github.run_attempt }}
+        run: npm run qualify:stripe
+
+  email-optional:
+    name: Resend controlled-recipient send preflight (optional)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check for provider credentials and an explicitly controlled recipient
+        id: credentials
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TEST_RECIPIENT: ${{ secrets.EMAIL_TEST_RECIPIENT }}
+        run: |
+          if [ -z "$RESEND_API_KEY" ] || [ -z "$EMAIL_FROM" ] || [ -z "$EMAIL_TEST_RECIPIENT" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Email provider qualification"
+              echo "**BLOCKED — test credentials unavailable.**"
+              echo "Configure RESEND_API_KEY, EMAIL_FROM, and EMAIL_TEST_RECIPIENT as GitHub Secrets. EMAIL_TEST_RECIPIENT must be a controlled inbox; this gate sends exactly one qualification email when all three are configured."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$RESEND_API_KEY" != re_* ]]; then
+            echo "::error::Resend qualification requires an re_ API key."
+            exit 1
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Email provider qualification"
+              echo "A single idempotent test message will be sent to the configured controlled recipient. The gate checks Resend API acceptance, not delivery to the inbox."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Set up Node.js
+        if: steps.credentials.outputs.configured == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        if: steps.credentials.outputs.configured == 'true'
+        run: npm ci --no-audit --no-fund
+      - name: Send one provider qualification email to the controlled recipient
+        if: steps.credentials.outputs.configured == 'true'
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TEST_RECIPIENT: ${{ secrets.EMAIL_TEST_RECIPIENT }}
+          QUALIFICATION_RUN_ID: wcm-${{ github.run_id }}-${{ github.run_attempt }}
+        run: npm run qualify:email

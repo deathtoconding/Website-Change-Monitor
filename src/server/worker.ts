@@ -13,7 +13,10 @@ import {
 } from "./services/notification-worker.js";
 import { FetchError } from "./services/http-fetcher.js";
 
-const retryDelays = [30_000, 2 * 60_000, 10 * 60_000];
+const retryDelays =
+  env.nodeEnv === "test"
+    ? [250, 500, 1_000]
+    : [30_000, 2 * 60_000, 10 * 60_000];
 
 const monitorWorker = new Worker<MonitorJobData>(
   "monitor-checks",

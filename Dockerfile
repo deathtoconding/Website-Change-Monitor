@@ -18,7 +18,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build --chown=node:node /app/build ./build
 COPY --from=build --chown=node:node /app/.next ./.next
-COPY --from=build --chown=node:node /app/next.config.ts ./next.config.ts
+COPY --from=build --chown=node:node /app/next.config.mjs ./next.config.mjs
 COPY --from=build --chown=node:node /app/drizzle ./drizzle
 USER node
 EXPOSE 3000 4000

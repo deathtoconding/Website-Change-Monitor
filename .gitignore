@@ -3,6 +3,9 @@ node_modules
 dist
 build
 coverage
+playwright-report
+playwright/.cache
+test-results
 .env
 .env.*
 !.env.example
