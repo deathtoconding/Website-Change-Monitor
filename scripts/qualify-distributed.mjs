@@ -78,7 +78,13 @@ try {
   }
 
   await verifyLivenessAndReadiness(apiOrigin);
-  await verifyRedisOutageReadiness();
+  if (externalStack) {
+    console.log(
+      "The Compose qualification separately tests live Redis outage and recovery readiness.",
+    );
+  } else {
+    await verifyRedisOutageReadiness();
+  }
 
   const email = `qualification-${runId}@example.com`;
   const password = "GoodPassword!234";

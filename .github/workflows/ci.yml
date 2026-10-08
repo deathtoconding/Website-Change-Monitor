@@ -75,15 +75,16 @@ jobs:
       - name: Ensure production Compose requires DATABASE_URL
         env:
           NODE_ENV: production
+          REDIS_URL: rediss://ci:ci@redis.example.test:6380
           SESSION_SECRET: ci-compose-validation-secret-not-for-use
           APP_ORIGIN: https://app.example.test
           APP_BASE_URL: https://app.example.test
         run: |
-          if DATABASE_URL= REDIS_URL= docker compose --env-file /dev/null config --quiet 2>/tmp/compose-config-error; then
+          if env -u DATABASE_URL docker compose --env-file /dev/null config --quiet >/tmp/compose-config-error 2>&1; then
             echo "Production Compose unexpectedly accepted a missing DATABASE_URL."
             exit 1
           fi
-          if ! grep -q DATABASE_URL /tmp/compose-config-error; then
+          if ! grep -Fq DATABASE_URL /tmp/compose-config-error; then
             cat /tmp/compose-config-error >&2
             echo "::error::Compose failed, but did not report that DATABASE_URL is required."
             exit 1
@@ -96,11 +97,11 @@ jobs:
           APP_ORIGIN: https://app.example.test
           APP_BASE_URL: https://app.example.test
         run: |
-          if REDIS_URL= docker compose --env-file /dev/null config --quiet 2>/tmp/compose-config-error; then
+          if env -u REDIS_URL docker compose --env-file /dev/null config --quiet >/tmp/compose-config-error 2>&1; then
             echo "Production Compose unexpectedly accepted a missing REDIS_URL."
             exit 1
           fi
-          if ! grep -q REDIS_URL /tmp/compose-config-error; then
+          if ! grep -Fq REDIS_URL /tmp/compose-config-error; then
             cat /tmp/compose-config-error >&2
             echo "::error::Compose failed, but did not report that REDIS_URL is required."
             exit 1
@@ -323,6 +324,43 @@ jobs:
             sleep 2
           done
           curl --fail --silent --show-error http://127.0.0.1:4000/health | jq -e '.status == "ok"'
+          compose=(docker compose -p wcm-qualification -f docker-compose.yml -f docker-compose.qualify.yml)
+          redis_stopped=0
+          restore_redis() {
+            if [ "$redis_stopped" -eq 1 ]; then
+              "${compose[@]}" start redis || true
+            fi
+          }
+          trap restore_redis EXIT
+          "${compose[@]}" stop redis
+          redis_stopped=1
+          redis_down_started_at=$(date +%s%3N)
+          redis_down_status=$(curl --silent --show-error --max-time 4 \
+            --output /tmp/compose-redis-down-ready.json \
+            --write-out '%{http_code}' http://127.0.0.1:4000/ready)
+          redis_down_elapsed_ms=$(( $(date +%s%3N) - redis_down_started_at ))
+          test "$redis_down_status" = "503"
+          jq -e '.status == "not_ready" and .dependencies.postgres == "ok" and .dependencies.redis == "unavailable"' /tmp/compose-redis-down-ready.json >/dev/null
+          test "$redis_down_elapsed_ms" -lt 4000
+          echo "Live Compose readiness isolated Redis failure in ${redis_down_elapsed_ms} ms."
+          "${compose[@]}" start redis
+          redis_stopped=0
+          redis_recovered=false
+          for attempt in $(seq 1 60); do
+            if [ "$("${compose[@]}" exec -T redis redis-cli ping 2>/dev/null | tr -d '\r')" = "PONG" ] && \
+              curl --fail --silent http://127.0.0.1:4000/ready | jq -e '.status == "ready" and .dependencies.postgres == "ok" and .dependencies.redis == "ok"' >/dev/null; then
+              redis_recovered=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$redis_recovered" != "true" ]; then
+            "${compose[@]}" logs --no-color
+            echo "::error::The Compose API did not recover readiness after Redis restarted."
+            exit 1
+          fi
+          trap - EXIT
+          echo "Live Compose readiness recovered after Redis restart."
           for attempt in $(seq 1 60); do
             if curl --fail --silent http://127.0.0.1:3000/ --output /tmp/compose-web.html 2>/tmp/compose-web-curl-error; then
               break
