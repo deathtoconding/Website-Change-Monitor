@@ -16,10 +16,10 @@ import {
   monitorQueue,
   notificationQueue,
   systemNotificationQueue,
-  redis,
   redisControl,
 } from "./queue.js";
 import { requestIdMiddleware } from "./middleware.js";
+import { checkReadiness } from "./readiness.js";
 import {
   incrementMetric,
   observeMetric,
@@ -137,17 +137,11 @@ app.use(
 
 app.get("/health", (_req, res) => res.status(200).json({ status: "ok" }));
 app.get("/ready", async (_req, res) => {
-  try {
-    await Promise.all([pingDatabase(), redis.ping(), redisControl.ping()]);
-    res
-      .status(200)
-      .json({ status: "ready", dependencies: { postgres: "ok", redis: "ok" } });
-  } catch {
-    res.status(503).json({
-      status: "not_ready",
-      dependencies: { postgres: "unknown", redis: "unknown" },
-    });
-  }
+  const readiness = await checkReadiness({
+    postgres: pingDatabase,
+    redis: () => redisControl.ping(),
+  });
+  res.status(readiness.status === "ready" ? 200 : 503).json(readiness);
 });
 app.get("/metrics", async (req, res) => {
   if (!env.metricsToken) {
