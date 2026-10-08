@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   assertProductionInfrastructureConfigured,
   assertProductionUrls,
+  getConfiguredTestFixtureOrigin,
   getMissingProductionEmailConfiguration,
 } from "./config-validation.js";
 
@@ -60,6 +61,8 @@ const envSchema = z.object({
     .max(60_000)
     .default(1_000),
   ALLOW_DEV_VERIFICATION_TOKEN: z.enum(["true", "false"]).default("true"),
+  TEST_FIXTURE_ORIGIN: z.string().url().optional(),
+  TEST_FIXTURE_ADDRESS: z.string().optional(),
   METRICS_TOKEN: z.preprocess(
     (value) => (value === "" || value == null ? undefined : value),
     z.string().min(24).optional(),
@@ -74,6 +77,12 @@ if (!parsed.success) {
   );
   throw new Error("Environment configuration is invalid.");
 }
+
+const testFixtureOrigin = getConfiguredTestFixtureOrigin(
+  parsed.data.NODE_ENV,
+  parsed.data.TEST_FIXTURE_ORIGIN,
+  parsed.data.TEST_FIXTURE_ADDRESS,
+);
 
 const appOriginUrl = new URL(parsed.data.APP_ORIGIN);
 const appBaseUrl = new URL(parsed.data.APP_BASE_URL ?? parsed.data.APP_ORIGIN);
@@ -151,6 +160,8 @@ export const env = {
   allowDevVerificationToken:
     parsed.data.ALLOW_DEV_VERIFICATION_TOKEN === "true" &&
     parsed.data.NODE_ENV !== "production",
+  testFixtureOrigin,
+  testFixtureAddress: parsed.data.TEST_FIXTURE_ADDRESS,
   metricsToken: parsed.data.METRICS_TOKEN,
 } as const;
 

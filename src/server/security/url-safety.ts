@@ -1,6 +1,7 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import ipaddr from "ipaddr.js";
+import { env } from "../config.js";
 
 export type AddressRecord = { address: string; family: number };
 export type Resolver = (hostname: string) => Promise<AddressRecord[]>;
@@ -55,7 +56,9 @@ export function normalizeHttpUrl(input: string): URL {
   if (url.username || url.password) {
     throw new UrlSafetyError("URLs containing credentials are not supported.");
   }
+  const testFixtureUrl = isConfiguredTestFixtureUrl(url);
   if (
+    !testFixtureUrl &&
     url.port &&
     !(
       (url.protocol === "http:" && url.port === "80") ||
@@ -70,9 +73,10 @@ export function normalizeHttpUrl(input: string): URL {
   const hostname = unbracket(url.hostname).toLowerCase().replace(/\.$/, "");
   if (!hostname || hostname.includes("%")) throw new UrlSafetyError();
   if (
-    BLOCKED_HOSTS.has(hostname) ||
-    BLOCKED_SUFFIXES.some((suffix) => hostname.endsWith(suffix)) ||
-    hostname === "localhost"
+    !testFixtureUrl &&
+    (BLOCKED_HOSTS.has(hostname) ||
+      BLOCKED_SUFFIXES.some((suffix) => hostname.endsWith(suffix)) ||
+      hostname === "localhost")
   ) {
     throw new UrlSafetyError(
       "Local and internal hostnames cannot be monitored.",
@@ -126,8 +130,41 @@ export async function assertSafeHttpUrl(
   resolver?: Resolver,
 ): Promise<{ url: URL; addresses: AddressRecord[] }> {
   const url = normalizeHttpUrl(input);
-  const addresses = await resolvePublicAddresses(url.hostname, resolver);
+  const addresses = isConfiguredTestFixtureUrl(url)
+    ? await resolveTestFixtureAddresses(url.hostname, resolver)
+    : await resolvePublicAddresses(url.hostname, resolver);
   return { url, addresses };
+}
+
+function isConfiguredTestFixtureUrl(url: URL): boolean {
+  return env.nodeEnv === "test" && env.testFixtureOrigin === url.origin;
+}
+
+async function resolveTestFixtureAddresses(
+  hostnameInput: string,
+  resolver?: Resolver,
+): Promise<AddressRecord[]> {
+  if (env.testFixtureAddress) {
+    return [
+      {
+        address: env.testFixtureAddress,
+        family: isIP(env.testFixtureAddress),
+      },
+    ];
+  }
+
+  const hostname = unbracket(hostnameInput).toLowerCase().replace(/\.$/, "");
+  const literalFamily = isIP(hostname);
+  const addresses = literalFamily
+    ? [{ address: hostname, family: literalFamily }]
+    : await (resolver ?? defaultResolver)(hostname).catch(() => {
+        throw new DnsResolutionError();
+      });
+  if (!addresses.length)
+    throw new UrlSafetyError(
+      "The local test fixture did not resolve to an address.",
+    );
+  return [addresses[0]!];
 }
 
 async function defaultResolver(hostname: string): Promise<AddressRecord[]> {

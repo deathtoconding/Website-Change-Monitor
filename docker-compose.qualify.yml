@@ -1,0 +1,110 @@
+# Disposable, CI-only overrides. Never attach these services to production data.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: wcm
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d wcm"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  fixture:
+    image: node:22-alpine
+    command: ["node", "/fixture/http-fixture.mjs"]
+    environment:
+      FIXTURE_PORT: "18088"
+    volumes:
+      - ./scripts/e2e/http-fixture.mjs:/fixture/http-fixture.mjs:ro
+    ports:
+      - "127.0.0.1:18088:18088"
+    networks:
+      default:
+        aliases:
+          - fixture.test
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:18088/__health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  migrate:
+    environment: &qualification-runtime-environment
+      NODE_ENV: test
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/wcm
+      REDIS_URL: redis://redis:6379/0
+      SESSION_SECRET: qualification-session-secret-not-for-production
+      APP_ORIGIN: http://127.0.0.1:3000
+      APP_BASE_URL: http://127.0.0.1:3000
+      TEST_FIXTURE_ORIGIN: http://fixture.test:18088
+      ALLOW_DEV_VERIFICATION_TOKEN: "true"
+      SCHEDULER_INTERVAL_MS: "1000"
+      FETCH_TIMEOUT_MS: "1000"
+      FETCH_MAX_REDIRECTS: "0"
+      FETCH_DOMAIN_COOLDOWN_MS: "250"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  api:
+    environment: *qualification-runtime-environment
+    ports:
+      - "127.0.0.1:4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      fixture:
+        condition: service_healthy
+
+  worker:
+    environment: *qualification-runtime-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  scheduler:
+    environment: *qualification-runtime-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web:
+    environment:
+      NODE_ENV: production
+      API_INTERNAL_ORIGIN: http://api:4000
+
+volumes:
+  postgres-data:
+    name: wcm-qualification-postgres-data
+  redis-data:
+    name: wcm-qualification-redis-data
